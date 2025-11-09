@@ -1,107 +1,73 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import ast
+import requests
 import pickle
 import os
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import gdown
 
-# Function to process data and create pkl file
-@st.cache_data
-def load_and_process_data():
-    # Check if pkl file already exists
-    if os.path.exists('movie_data.pkl'):
-        with open('movie_data.pkl', 'rb') as f:
-            movies, cosine_sim = pickle.load(f)
-        return movies, cosine_sim
-    
-    st.info("🔄 Processing movie data for the first time... This may take a minute.")
-    
-    # Load CSV files
-    credits = pd.read_csv('tmdb_5000_credits.csv')
-    movies = pd.read_csv('tmdb_5000_movies.csv')
-    
-    # === CODE FROM YOUR NOTEBOOK ===
-    movies = movies.merge(credits, left_on='title', right_on='title')
-    movies = movies[['movie_id', 'title', 'overview', 'genres', 'keywords', 'cast', 'crew']]
-    
-    def convert(obj):
-        L = []
-        for i in ast.literal_eval(obj):
-            L.append(i['name'])
-        return L
-    
-    movies['genres'] = movies['genres'].apply(convert)
-    movies['keywords'] = movies['keywords'].apply(convert)
-    movies['cast'] = movies['cast'].apply(lambda x: [i['name'] for i in ast.literal_eval(x)[:3]])
-    movies['crew'] = movies['crew'].apply(lambda x: [i['name'] for i in ast.literal_eval(x) if i['job'] == 'Director'])
-    
-    movies['tags'] = movies['genres'] + movies['keywords'] + movies['cast'] + movies['crew']
-    movies['tags'] = movies['tags'].apply(lambda x: " ".join(x))
-    movies = movies[['movie_id', 'title', 'overview', 'tags']]
-    movies['tags'] = movies['tags'].apply(lambda x: x.lower())
-    
-    # TF-IDF and Cosine Similarity
-    tfidf = TfidfVectorizer(stop_words='english')
-    tfidf_matrix = tfidf.fit_transform(movies['tags'])
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    
-    # Save to pkl
-    with open('movie_data.pkl', 'wb') as f:
-        pickle.dump((movies, cosine_sim), f)
-    
-    st.success("✅ Data processing completed!")
-    return movies, cosine_sim
-
-# Recommendation function from your notebook
-def get_recommendations(title, cosine_sim, movies):
-    try:
-        idx = movies[movies['title'] == title].index[0]
-        sim_scores = list(enumerate(cosine_sim[idx]))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-        sim_scores = sim_scores[1:11]
-        movie_indices = [i[0] for i in sim_scores]
-        return movies['title'].iloc[movie_indices]
-    except:
-        return pd.Series(["Movie not found"])
-
-# === STREAMLIT APP ===
-st.set_page_config(page_title="Movie Recommendation System", layout="wide")
+st.set_page_config(page_title="🎬 Movie Recommendation System", layout="wide")
 
 st.title("🎬 Movie Recommendation System")
-st.markdown("---")
+st.write("🔹 Recommend movies similar to your favorite one!")
 
-# Load data
-movies, cosine_sim = load_and_process_data()
+# === Step 1: Download movie_data.pkl from Google Drive ===
+file_path = "movie_data.pkl"
+gdrive_url = "https://drive.google.com/uc?id=1_X2aSXG5zNPM1MMDoNUku7UyXA0Bhghk"
 
-st.success(f"✅ Loaded {len(movies)} movies successfully!")
+if not os.path.exists(file_path):
+    with st.spinner("📥 Downloading data from Google Drive (~500MB)... Please wait."):
+        gdown.download(gdrive_url, file_path, quiet=False)
+    st.success("✅ Download completed successfully!")
 
-# Display movie selection
-selected_movie = st.selectbox(
-    "🎭 Select a movie to get recommendations:",
-    movies['title'].values
-)
+# === Step 2: Load pickle data ===
+with open(file_path, "rb") as file:
+    movies, cosine_sim = pickle.load(file)
 
-# Get recommendations
+# === Step 3: Define functions ===
+def get_recommendations(title, cosine_sim=cosine_sim):
+    try:
+        idx = movies[movies["title"] == title].index[0]
+        sim_scores = list(enumerate(cosine_sim[idx]))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        sim_scores = sim_scores[1:11]  # Top 10
+        movie_indices = [i[0] for i in sim_scores]
+        return movies[["title", "movie_id"]].iloc[movie_indices]
+    except:
+        return pd.DataFrame(columns=["title", "movie_id"])
+
+def fetch_poster(movie_id):
+    api_key = "7b995d3c6fd91a2284b4ad8cb390c7b8"  # Replace with your TMDB API key
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={api_key}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        poster_path = data.get("poster_path")
+        if poster_path:
+            return f"https://image.tmdb.org/t/p/w500{poster_path}"
+    return "https://via.placeholder.com/300x450?text=No+Image"
+
+# === Step 4: Streamlit UI ===
+selected_movie = st.selectbox("🎞️ Select a movie:", movies["title"].values)
+
 if st.button("Get Recommendations 🚀"):
-    recommendations = get_recommendations(selected_movie, cosine_sim, movies)
-    
-    st.subheader(f"🎯 Recommendations for: **{selected_movie}**")
-    
-    for i, movie in enumerate(recommendations, 1):
-        st.write(f"{i}. {movie}")
+    with st.spinner("Generating recommendations..."):
+        recommendations = get_recommendations(selected_movie)
 
-# Display some movie info
-st.markdown("---")
-st.subheader("📊 Movie Data Overview")
-col1, col2 = st.columns(2)
+    if recommendations.empty:
+        st.error("❌ Movie not found in dataset.")
+    else:
+        st.subheader(f"🎯 Top 10 movies similar to **{selected_movie}**:")
 
-with col1:
-    st.write("**First 5 movies:**")
-    st.dataframe(movies[['title', 'tags']].head())
+        # Display 2 rows × 5 columns (10 movies)
+        for i in range(0, 10, 5):
+            cols = st.columns(5)
+            for col, j in zip(cols, range(i, i+5)):
+                if j < len(recommendations):
+                    movie_title = recommendations.iloc[j]["title"]
+                    movie_id = recommendations.iloc[j]["movie_id"]
+                    poster_url = fetch_poster(movie_id)
+                    with col:
+                        st.image(poster_url, width=140)
+                        st.caption(movie_title)
 
-with col2:
-    st.write("**Dataset info:**")
-    st.write(f"Total movies: {len(movies)}")
-    st.write(f"Columns: {list(movies.columns)}")
